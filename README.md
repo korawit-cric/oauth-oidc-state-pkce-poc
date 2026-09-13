@@ -1,100 +1,107 @@
 # oauth-oidc-state-pkce-poc
 
-A [knowledge-sharing repository](https://github.com/korawit-cric/oauth-oidc-state-pkce-poc) for understanding how an application can use an external identity provider, then establish and enforce its own browser session. The runnable Next.js demo uses a **local mock provider**, not ThaiD. It does not authenticate a real person or call ThaiD endpoints.
+A [knowledge-sharing PoC](https://github.com/korawit-cric/oauth-oidc-state-pkce-poc) for backend-owned OAuth login with `state`, PKCE, and encrypted cookies. It runs against a **local mock identity provider**. It does not connect to ThaiD or authenticate a real person.
 
-## What this PoC teaches
+## 1. The idea
 
-The external provider returns a login result. The backend validates it, maps the identity, and creates its own encrypted cookie session. The browser follows redirects and sends cookies, but never decides whether a callback proves identity. This PoC stops at checking that the session exists and has not expired; it does not implement role or attribute permissions.
+An external provider handles the user's login. Our backend receives the callback, verifies the login attempt, exchanges the authorization code, and creates **its own application session**. The browser follows redirects and carries cookies; it does not decide whether a callback is valid.
 
-The flow has two separate credentials: a **temporary login-attempt cookie** used only during the provider redirect, and an **application session cookie** used after login.
+There are two cookies with different jobs:
+
+- `oauth_attempt` is temporary. It holds encrypted `state`, the PKCE verifier, and an expiry during the redirect.
+- `app_session` is separate. It holds the application's encrypted identity and expiry after successful login.
+
+## 2. Who is responsible for what?
+
+| Part                  | Responsibility in this PoC                                                                           |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| Browser / frontend    | Start login, follow redirects, send cookies, display the result.                                     |
+| Next.js server routes | Generate and verify state/PKCE, exchange the code, map identity, issue and validate the app session. |
+| Local mock provider   | Return an authorization code and a fixed demo identity. It stands in for an external provider.       |
+
+In a real ThaiD integration, ThaiD would authenticate the user. Its actual endpoints, scopes, claims, and client-authentication requirements must come from the integration contract.
+
+## 3. Login flow, step by step
 
 ```text
-Browser opens /auth/login
-        ↓
-App server creates state + PKCE verifier
-        ↓  sets encrypted oauth_attempt cookie (5 minutes)
-Browser redirects to mock provider
-        ↓  provider returns code + state
-App server validates state and exchanges code with PKCE verifier
-        ↓  clears oauth_attempt; sets encrypted app_session cookie (1 hour)
-Browser opens /dashboard
-        ↓
-App server validates app_session and shows the protected page
+Browser                  App server                 Mock provider
+  | GET /auth/login          |                            |
+  |------------------------->| create state + PKCE        |
+  |<-- oauth_attempt cookie -| redirect with challenge   |
+  |-------------------------- redirect ------------------->|
+  |<----------------------- code + state -------------------|
+  | GET /auth/callback       |                            |
+  |------------------------->| verify state and expiry    |
+  |                          | exchange code + verifier ->|
+  |                          |<-- mock identity ----------|
+  |<-- app_session cookie ---| clear oauth_attempt        |
+  | GET /dashboard          |                            |
+  |------------------------->| validate app_session       |
+  |<-- protected page -------|                            |
 ```
 
-The mock provider lives in this repository for learning. In a real integration, the provider is a separate service and the backend must validate its OIDC response.
+1. `GET /auth/login` generates a random `state` and PKCE verifier. The server encrypts them into the five-minute `oauth_attempt` cookie and redirects the browser with the derived S256 challenge.
+2. The mock provider returns an authorization `code` and the original `state` to `/auth/callback`.
+3. The callback decrypts the attempt cookie, checks its expiry, compares `state`, and exchanges the code using the saved verifier. A missing, expired, or mismatched attempt is rejected.
+4. The server maps the returned mock identity to an application identity, clears `oauth_attempt`, and sets a one-hour encrypted `app_session` cookie.
+5. On `/dashboard`, the server decrypts `app_session` and checks its expiry. Logout clears the cookie in this browser.
 
-The temporary `oauth_attempt` cookie contains a random `state`, a PKCE verifier, and a five-minute expiry. AES-256-GCM provides both confidentiality and tamper detection. The callback compares state, uses the verifier to exchange the code, and clears the attempt cookie. A separate `app_session` cookie holds the mapped application identity and a one-hour expiry. Both cookies are `HttpOnly` and `SameSite=Lax`; they are `Secure` in production. The dashboard validates the app session on the server. Logging out clears it.
+`state` ties the callback to the login that started in this browser. PKCE ties the code exchange to the verifier created by our server. The application session is a new credential for our app; it is not the provider's code or token.
 
-## Architecture choices from the authentication guide
+Both cookies use AES-256-GCM authenticated encryption, `HttpOnly`, and `SameSite=Lax`. They use `Secure` in production; HTTP localhost development cannot use a `Secure` cookie. The encryption secret comes from `AUTH_COOKIE_SECRET`, never from source code.
 
-The supplied authentication guide's ThaiD sections (25 and 27) describe several ways to keep OAuth login state and application sessions. They share the same trust boundary: the frontend starts login and follows redirects; the backend creates and validates state, exchanges the provider response, maps the external identity, and creates an application login; the identity provider authenticates the person. Provider endpoints, scopes, claims, and client authentication must come from the actual ThaiD integration contract.
+## 4. Other ways to store the login attempt
 
-### 1. Where to keep the temporary login attempt
+The backend needs `state`, the PKCE verifier, and an expiry between login start and callback. The supplied authentication guide describes three reasonable locations:
 
-The app must remember the random `state`, PKCE verifier, expiry, and possibly a safe return path while the browser visits the provider. The callback must validate that state before using the authorization code.
+| Approach                        | How callback finds the attempt                    | Good reason to choose it                               | Tradeoff                                                                        |
+| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| Redis                           | Look up and atomically consume short-lived state. | Shared across servers; easy one-time use and expiry.   | Another service to run.                                                         |
+| PostgreSQL                      | Look up an attempt row and mark it used.          | Durable; useful if PostgreSQL is already operated.     | Extra reads, writes, and cleanup.                                               |
+| Encrypted cookie **(this PoC)** | Decrypt the browser's short-lived cookie.         | No login-attempt store; easiest flow to run and study. | No reliable one-time consumption across parallel requests without shared state. |
 
-The comparison below shows that all three choices can carry the same logical state. They differ in where it is kept and whether the backend can consume it exactly once.
+A signed cookie detects changes but does not hide its contents. Encryption also hides the PKCE verifier. The secret must be stable across app instances and rotated deliberately.
 
-| Option                         | How it works                                                                                              | Strength                                      | Cost or limitation                                                                                                           |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Redis                          | Store an attempt keyed by a state hash with a short TTL; the callback atomically consumes it              | One-time use and sharing across app instances | Requires Redis operations and availability                                                                                   |
-| PostgreSQL                     | Store an attempt row with state hash, protected verifier, expiry, and `used_at`; mark it used at callback | Durable and works with an existing database   | Adds reads/writes and cleanup policy                                                                                         |
-| Protected cookie (chosen here) | Encrypt and authenticate state, verifier, and expiry in a short-lived browser cookie                      | No login-attempt store; simple to run         | Cannot reliably enforce one-time use across parallel requests without shared state; requires careful key and cookie handling |
+## 5. Other ways to keep the application logged in
 
-The PoC uses AES-256-GCM because the verifier should be hidden as well as protected from modification. A signature alone proves integrity but leaves cookie contents readable. The cookie is `HttpOnly` and `SameSite=Lax`, has a five-minute maximum age, and becomes `Secure` over production HTTPS. The browser returns it to the callback; the server decrypts it, checks expiry and state, uses the verifier, then clears it. A shared store is the better choice when exact single-use consumption or operational control is required.
+After external identity is validated, the backend creates an app session. This is a separate design choice from where the temporary login attempt lives.
 
-### 2. Where to keep the application session
+| Approach                                  | Browser holds                 | Server does on each request             | Main tradeoff                                              |
+| ----------------------------------------- | ----------------------------- | --------------------------------------- | ---------------------------------------------------------- |
+| Redis session                             | Opaque session ID             | Look up the active session.             | Fast revocation, but requires Redis.                       |
+| PostgreSQL session                        | Opaque session ID             | Look up a non-expired, non-revoked row. | Revocable, but adds a database lookup.                     |
+| Encrypted stateless cookie **(this PoC)** | Protected identity and expiry | Decrypt and check expiry.               | No lookup, but a copied cookie remains valid until expiry. |
 
-After a provider identity is validated, the backend maps its subject to an application user and creates a separate session. Future requests use that session, not the provider's authorization code or identity response. Here the protected dashboard only checks the session's authenticity and expiry.
+A hybrid can use the encrypted login-attempt cookie from section 4 and a revocable Redis or PostgreSQL app session here. That may be a better production design when immediate revocation matters.
 
-| Option                                           | Browser carries                   | Server does on each request              | Best fit and tradeoff                                                        |
-| ------------------------------------------------ | --------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------- |
-| Redis session                                    | Opaque random session ID          | Look up session and current user         | Fast shared lookup and immediate revocation, with another service to operate |
-| PostgreSQL session                               | Opaque random session ID          | Look up non-expired, non-revoked session | Straightforward when PostgreSQL is already present, at database-request cost |
-| Stateless encrypted/signed session (chosen here) | Protected app identity and expiry | Verify cryptography and expiry           | No central lookup, but copied cookies remain usable until expiry             |
+## 6. Why this PoC chooses encrypted cookies
 
-The PoC's `app_session` is an encrypted, authenticated one-hour cookie. Logout removes it from this browser; it does **not** invalidate a copy already stolen. A production system needing immediate logout or cross-device revocation should use server-side sessions or add a revocation check. A hybrid is also possible: keep the short-lived login attempt in an encrypted cookie, then issue a Redis or PostgreSQL-backed app session.
+The purpose is to make the OAuth redirect, `state`, PKCE, callback, and app-session boundary easy to see **without running Redis or PostgreSQL**. Two short-lived protected cookies keep the runnable example small. This is the best fit for the PoC's learning goal, not a claim that stateless cookies are best for every production application.
 
-### What this demo leaves out
+Choose a server-side store when you need one-time login-attempt consumption, immediate session revocation, cross-device logout, or current server-side user data on every request. Redis is useful when it is already operated or traffic is high; PostgreSQL is often simpler when it is already the application's database.
 
-There is no refresh token or refresh endpoint. When the one-hour app cookie expires, login starts again. The dashboard does not enforce RBAC, ABAC, tenant rules, or business permissions; those belong to a separate authorization layer if a real application needs them.
+## 7. Run and inspect
 
-### Why the cookie approach is chosen for this PoC
+Requires Node.js 22.12 or newer and npm. Only `apps/web` is needed for this flow; the NestJS API and database directories are not used.
 
-For **this teaching repository**, the goal is to expose state, PKCE, the callback, and the app-session boundary with as little infrastructure as possible. A protected login-state cookie and a protected app-session cookie make every step runnable in the web app alone. This is the simplest way to study the mechanics, **not a universal best production architecture**. The choice changes when requirements change:
-
-- Need one-time login attempts, immediate revocation, or several app instances: use Redis-backed state and/or sessions.
-- Already rely on PostgreSQL and prefer fewer services: store attempts and sessions there.
-- Need no attempt store but revocable sessions: use the hybrid cookie-attempt plus server-session design.
-- Need provider/API access after login: define a backend-owned token/refresh lifecycle rather than putting high-value provider tokens in browser JavaScript.
-
-Whatever is chosen, `state` binds the callback to the initiating login, PKCE binds code exchange to the verifier, provider validation establishes external identity, and application authorization decides what that identity may do. Each step solves a different problem.
-
-## Run the demo
-
-Requires Node.js 22.12 or newer and npm. The authentication demo runs through `apps/web`; the NestJS API and database directories are present but are not used in this flow.
-
-1. Install dependencies: `npm install`.
+1. Run `npm install`.
 2. Generate a secret: `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`.
 3. Put it in `apps/web/.env.local` as `AUTH_COOKIE_SECRET=<generated value>`.
-4. Run `npm run dev --workspace=web`, open <http://localhost:3000>, and click **Start mock ThaiD login**.
-5. Inspect the redirects, `oauth_attempt` and `app_session` cookies, `/dashboard`, and logout in browser developer tools.
+4. Run `npm run dev --workspace=web` and open <http://localhost:3000>.
+5. Click **Start mock ThaiD login**. In browser developer tools, inspect the redirects, the two cookies, `/dashboard`, and logout.
 
-Keep the secret out of Git. If you use the root `npm run dev` command, place the secret in the root `.env` so the repository's environment-distribution script can share it with the app.
+Keep the secret out of Git. If using the root `npm run dev` command, put it in the root `.env` so the repository's environment-distribution script can share it with the app.
 
-## Code map
+## 8. Implementation map and limits
 
-- `apps/web/app/auth/login/route.ts`: generate state and PKCE, set the temporary cookie, redirect.
-- `apps/web/app/mock-provider/`: local authorization and token endpoints for teaching.
-- `apps/web/app/auth/callback/route.ts`: verify the callback, exchange the code, create the app session.
+- `apps/web/app/auth/login/route.ts`: start login and set the temporary cookie.
+- `apps/web/app/mock-provider/`: local authorization and token endpoints.
+- `apps/web/app/auth/callback/route.ts`: check state, exchange code, create the app session.
 - `apps/web/lib/auth/`: authenticated encryption and flow types.
-- `apps/web/app/dashboard/page.tsx`: server-side session check.
+- `apps/web/app/dashboard/page.tsx`: validate the session server-side.
 - `apps/web/app/auth/logout/route.ts`: clear cookies.
-- [`apps/web/AUTH_DEMO.md`](apps/web/AUTH_DEMO.md): detailed flow and production gaps.
+- [`apps/web/AUTH_DEMO.md`](apps/web/AUTH_DEMO.md): further production considerations.
 
-## Boundaries and next steps
+The mock provider returns a simplified identity response. A real ThaiD adapter must use registered endpoints and redirect URI, required client authentication, and validation of the actual OIDC identity response (signature, issuer, audience, expiry, nonce where applicable, and claim mapping). Never treat callback query parameters or an unverified decoded token as identity.
 
-The mock provider returns a simplified identity response. A real ThaiD adapter needs the registered endpoints, exact redirect URI, required client authentication, and validation of the actual OIDC identity result, including signature, issuer, audience, expiry, nonce where applicable, and claim mapping. Do not treat a callback query parameter or an unverified decoded token as identity.
-
-The current mock code is not one-time. The app session is stateless, so clearing one browser's cookie does not revoke a copied cookie. The PoC also does not implement durable user mapping, RBAC/ABAC, tenant checks, audit logs, rate limits, refresh, or a production CSRF strategy for state-changing actions. Add those separately if a real application requires them.
+This PoC has no one-time mock-code consumption, immediate revocation of a copied cookie, durable user mapping, refresh, RBAC/ABAC, tenant checks, audit logs, rate limits, or production CSRF handling. Those are separate concerns to add if the real application requires them.

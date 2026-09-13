@@ -1,8 +1,8 @@
 {
-  "name": "cric-monex-root-template-v2",
+  "name": "oauth-oidc-state-pkce-poc",
   "version": "0.0.0",
   "private": true,
-  "description": "",
+  "description": "Knowledge-sharing PoC for OAuth/OIDC state, PKCE, and encrypted-cookie sessions",
   "author": "",
   "license": "UNLICENSED",
   "scripts": {

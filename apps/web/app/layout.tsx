@@ -11,7 +11,7 @@ const prompt = Prompt({
 });
 
 export const metadata: Metadata = {
-  title: 'OAuth Cookie Flow Demo',
+  title: 'oauth-oidc-state-pkce-poc',
   description: 'External OAuth and internal encrypted-cookie session demo',
 };
 

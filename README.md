@@ -8,16 +8,18 @@ The external provider returns a login result. The backend validates it, maps the
 
 The flow has two separate credentials: a **temporary login-attempt cookie** used only during the provider redirect, and an **application session cookie** used after login.
 
-```csv
-step,owner,action
-1,Browser,Open /auth/login
-2,App server,Create state and PKCE verifier; set encrypted oauth_attempt cookie
-3,Browser,Follow redirect to mock provider
-4,Mock provider,Return authorization code and state to /auth/callback
-5,App server,Check state and expiry; exchange code with PKCE verifier
-6,App server,Map identity; clear attempt cookie; set encrypted app_session cookie
-7,Browser,Open /dashboard with app_session cookie
-8,App server,Validate cookie and expiry; show protected page
+```text
+Browser opens /auth/login
+        ↓
+App server creates state + PKCE verifier
+        ↓  sets encrypted oauth_attempt cookie (5 minutes)
+Browser redirects to mock provider
+        ↓  provider returns code + state
+App server validates state and exchanges code with PKCE verifier
+        ↓  clears oauth_attempt; sets encrypted app_session cookie (1 hour)
+Browser opens /dashboard
+        ↓
+App server validates app_session and shows the protected page
 ```
 
 The mock provider lives in this repository for learning. In a real integration, the provider is a separate service and the backend must validate its OIDC response.

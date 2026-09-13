@@ -8,26 +8,16 @@ The external provider returns a login result. The backend validates it, maps the
 
 The flow has two separate credentials: a **temporary login-attempt cookie** used only during the provider redirect, and an **application session cookie** used after login.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Browser
-    participant App as Next.js app server
-    participant IdP as Local mock provider
-    Browser->>App: GET /auth/login
-    App->>App: Create state and PKCE verifier
-    App-->>Browser: Set encrypted oauth_attempt cookie
-    App-->>Browser: Redirect with state and PKCE challenge
-    Browser->>IdP: Authorization request
-    IdP-->>Browser: Redirect with code and state
-    Browser->>App: GET /auth/callback + oauth_attempt cookie
-    App->>App: Decrypt cookie; check state and expiry
-    App->>IdP: Exchange code with PKCE verifier
-    IdP-->>App: Mock identity
-    App->>App: Map identity to app user
-    App-->>Browser: Clear attempt; set encrypted app_session
-    Browser->>App: GET /dashboard + app_session cookie
-    App-->>Browser: Validate session; show protected page
+```csv
+step,owner,action
+1,Browser,Open /auth/login
+2,App server,Create state and PKCE verifier; set encrypted oauth_attempt cookie
+3,Browser,Follow redirect to mock provider
+4,Mock provider,Return authorization code and state to /auth/callback
+5,App server,Check state and expiry; exchange code with PKCE verifier
+6,App server,Map identity; clear attempt cookie; set encrypted app_session cookie
+7,Browser,Open /dashboard with app_session cookie
+8,App server,Validate cookie and expiry; show protected page
 ```
 
 The mock provider lives in this repository for learning. In a real integration, the provider is a separate service and the backend must validate its OIDC response.
@@ -42,18 +32,7 @@ The supplied authentication guide's ThaiD sections (25 and 27) describe several 
 
 The app must remember the random `state`, PKCE verifier, expiry, and possibly a safe return path while the browser visits the provider. The callback must validate that state before using the authorization code.
 
-```mermaid
-flowchart LR
-    A[Start login] --> B{Where is the login attempt?}
-    B -->|This PoC| C[Encrypted browser cookie]
-    B -->|Shared fast store| D[Redis with TTL]
-    B -->|Existing database| E[PostgreSQL row]
-    C --> F[Callback validates state and PKCE]
-    D --> F
-    E --> F
-```
-
-All three choices can carry the same logical state. They differ in where it is kept and whether the backend can consume it exactly once.
+The comparison below shows that all three choices can carry the same logical state. They differ in where it is kept and whether the backend can consume it exactly once.
 
 | Option                         | How it works                                                                                              | Strength                                      | Cost or limitation                                                                                                           |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -66,20 +45,6 @@ The PoC uses AES-256-GCM because the verifier should be hidden as well as protec
 ### 2. Where to keep the application session
 
 After a provider identity is validated, the backend maps its subject to an application user and creates a separate session. Future requests use that session, not the provider's authorization code or identity response. Here the protected dashboard only checks the session's authenticity and expiry.
-
-```mermaid
-flowchart LR
-    A[Validated provider identity] --> B[Map to application user]
-    B --> C{Session design}
-    C -->|This PoC| D[Encrypted app_session cookie]
-    C -->|Revocable| E[Opaque ID plus Redis or PostgreSQL]
-    D --> F[Next request: verify cookie and expiry]
-    E --> G[Next request: look up active session]
-    F --> H[Show protected dashboard]
-    G --> H
-```
-
-**Remember:** this PoC demonstrates login and a protected page, not a complete authorization policy.
 
 | Option                                           | Browser carries                   | Server does on each request              | Best fit and tradeoff                                                        |
 | ------------------------------------------------ | --------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------- |

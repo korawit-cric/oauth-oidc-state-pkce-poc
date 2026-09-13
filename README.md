@@ -6,21 +6,31 @@ A [knowledge-sharing repository](https://github.com/korawit-cric/oauth-oidc-stat
 
 Authentication with an external provider and authorization inside an application are different responsibilities. The provider establishes an identity; the application validates that result, maps it to an application user, creates a session, and checks access to its own resources. The browser never decides that a callback proves identity on its own.
 
-```text
-Browser                 App server                   Mock provider
-   | GET /auth/login         |                              |
-   |------------------------>| generate state + PKCE       |
-   |<-- encrypted attempt ---| redirect with challenge     |
-   |------------------------ redirect --------------------->|
-   |<------------------- code + state ----------------------|
-   | GET /auth/callback      |                              |
-   |------------------------>| verify state and expiry     |
-   |                         | exchange code + verifier --->|
-   |                         |<--- mock identity -----------|
-   |<-- encrypted session ---| map to app user              |
-   | GET /dashboard         |                              |
-   |------------------------>| validate app session        |
+The flow has two separate credentials: a **temporary login-attempt cookie** used only during the provider redirect, and an **application session cookie** used after login.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Browser
+    participant App as Next.js app server
+    participant IdP as Local mock provider
+    Browser->>App: GET /auth/login
+    App->>App: Create state and PKCE verifier
+    App-->>Browser: Set encrypted oauth_attempt cookie
+    App-->>Browser: Redirect with state and PKCE challenge
+    Browser->>IdP: Authorization request
+    IdP-->>Browser: Redirect with code and state
+    Browser->>App: GET /auth/callback + oauth_attempt cookie
+    App->>App: Decrypt cookie; check state and expiry
+    App->>IdP: Exchange code with PKCE verifier
+    IdP-->>App: Mock identity
+    App->>App: Map identity to app user
+    App-->>Browser: Clear attempt; set encrypted app_session
+    Browser->>App: GET /dashboard + app_session cookie
+    App-->>Browser: Validate session; show protected page
 ```
+
+The mock provider lives in this repository for learning. In a real integration, the provider is a separate service and the backend must validate its OIDC response.
 
 The temporary `oauth_attempt` cookie contains a random `state`, a PKCE verifier, and a five-minute expiry. AES-256-GCM provides both confidentiality and tamper detection. The callback compares state, uses the verifier to exchange the code, and clears the attempt cookie. A separate `app_session` cookie holds the mapped application identity and a one-hour expiry. Both cookies are `HttpOnly` and `SameSite=Lax`; they are `Secure` in production. The dashboard validates the app session on the server. Logging out clears it.
 
@@ -31,6 +41,19 @@ The supplied authentication guide's ThaiD sections (25 and 27) describe several 
 ### 1. Where to keep the temporary login attempt
 
 The app must remember the random `state`, PKCE verifier, expiry, and possibly a safe return path while the browser visits the provider. The callback must validate that state before using the authorization code.
+
+```mermaid
+flowchart LR
+    A[Start login] --> B{Where is the login attempt?}
+    B -->|This PoC| C[Encrypted browser cookie]
+    B -->|Shared fast store| D[Redis with TTL]
+    B -->|Existing database| E[PostgreSQL row]
+    C --> F[Callback validates state and PKCE]
+    D --> F
+    E --> F
+```
+
+All three choices can carry the same logical state. They differ in where it is kept and whether the backend can consume it exactly once.
 
 | Option                         | How it works                                                                                              | Strength                                      | Cost or limitation                                                                                                           |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -44,6 +67,21 @@ The PoC uses AES-256-GCM because the verifier should be hidden as well as protec
 
 After a provider identity is validated, the app maps that provider subject to its own user. The provider credential is not the app's permission model. Future business requests should use an application session and enforce current roles, permissions, and tenant boundaries on the server.
 
+```mermaid
+flowchart LR
+    A[Validated provider identity] --> B[Map to application user]
+    B --> C{Session design}
+    C -->|This PoC| D[Encrypted app_session cookie]
+    C -->|Revocable| E[Opaque ID plus Redis or PostgreSQL]
+    D --> F[Next request: verify cookie and expiry]
+    E --> G[Next request: look up active session]
+    F --> H[Check app permissions and resource scope]
+    G --> H
+    H --> I[Allow or deny protected action]
+```
+
+**Remember:** logging in proves who the user is; the permission and resource checks decide what that user can do.
+
 | Option                                           | Browser carries                   | Server does on each request              | Best fit and tradeoff                                                                                |
 | ------------------------------------------------ | --------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | Redis session                                    | Opaque random session ID          | Look up session and current user         | Fast shared lookup and immediate revocation, with another service to operate                         |
@@ -56,7 +94,20 @@ The PoC's `app_session` is an encrypted, authenticated one-hour cookie. Logout r
 
 This demo has no refresh token. When the hour-long app session expires, the user starts login again. For a longer-lived experience, the guide presents a frontend-triggered refresh call that sends an `HttpOnly` cookie, and a backend-for-frontend design where the server owns the refresh credential. JavaScript-readable refresh tokens increase exposure to injected scripts. A client should retry an expired request at most once after a `401`; a `403` means the known user lacks permission and should not trigger refresh.
 
-After login, RBAC can grant broad permissions through roles; ABAC can restrict actions by resource ownership, tenant, store, region, status, or other context. For example, a store manager's role may permit `order.update_status`, while a resource check must still confirm the order belongs to an assigned store. The backend must enforce both checks near the protected operation. Long-lived embedded role claims become stale when privileges change, which favors short lifetimes or a current server-side lookup. Sensitive changes should be audited.
+For a protected action, the checks are sequential: identify the user, check the broad permission, then check the specific resource and context.
+
+```mermaid
+flowchart LR
+    A[Request] --> B{Valid app session?}
+    B -->|No| C[401: log in again]
+    B -->|Yes| D{RBAC permission?}
+    D -->|No| E[403: access denied]
+    D -->|Yes| F{ABAC: correct tenant, owner, state?}
+    F -->|No| E
+    F -->|Yes| G[Perform action and audit]
+```
+
+The authorization diagram is a **production design target**, not behavior implemented by this demo dashboard. After login, RBAC can grant broad permissions through roles; ABAC can restrict actions by resource ownership, tenant, store, region, status, or other context. For example, a store manager's role may permit `order.update_status`, while a resource check must still confirm the order belongs to an assigned store. The backend must enforce both checks near the protected operation. Long-lived embedded role claims become stale when privileges change, which favors short lifetimes or a current server-side lookup. Sensitive changes should be audited.
 
 ### Why the cookie approach is chosen for this PoC
 

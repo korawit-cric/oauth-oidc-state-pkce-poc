@@ -1,6 +1,29 @@
-#     cric-monex-root-template-v2
+# cric-monex-root-template-v2
 
 A full-stack monorepo featuring NestJS APIs, Next.js frontends, and Prisma ORM with PostgreSQL.
+
+## OAuth and encrypted-cookie demo
+
+The Next.js app at `apps/web` now demonstrates **external login followed by an internal application session**. Its “ThaiD” provider is a **local mock**, so the flow runs without ThaiD credentials or a database. It does not authenticate a real person. The NestJS API and PostgreSQL parts of this template remain available for later integration, but are not used by this demo.
+
+```text
+Browser → GET /auth/login → mock provider → GET /auth/callback
+           state + PKCE      authorization code    validate state,
+           in encrypted cookie                      exchange with PKCE
+                                                      ↓
+Browser → GET /dashboard ← encrypted app_session cookie
+```
+
+The app server generates random OAuth `state` and a PKCE verifier. It stores them in a five-minute AES-256-GCM authenticated-encryption cookie with `HttpOnly` and `SameSite=Lax`. The mock provider receives only the S256 challenge. At the callback, the server checks the cookie and returned state, exchanges the code using the verifier, maps the mock identity to an app user, clears the login cookie, and issues a separate one-hour encrypted `app_session` cookie. The dashboard validates that session server-side; logout clears it. Cookies use `Secure` when `NODE_ENV=production`.
+
+To run just this demo:
+
+1. Run `npm install`.
+2. Generate a secret: `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`.
+3. Put it in `apps/web/.env.local` as `AUTH_COOKIE_SECRET=<generated value>`. A root `.env` also works with the repository's environment distribution script.
+4. Run `npm run dev --workspace=web` and open <http://localhost:3000>. Click **Start mock ThaiD login** and inspect the redirect, callback, cookies, and dashboard.
+
+Keep the secret out of Git. This stateless teaching example does not give one-time authorization-code consumption, immediate session revocation, or authoritative roles and tenants. A real ThaiD integration needs registered endpoints and redirect URI, provider client authentication, and validation of the actual OIDC identity response before issuing an app session. See [the detailed flow and production gaps](apps/web/AUTH_DEMO.md).
 
 ## What's inside?
 

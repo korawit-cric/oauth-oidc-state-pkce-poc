@@ -24,18 +24,50 @@ Browser                 App server                   Mock provider
 
 The temporary `oauth_attempt` cookie contains a random `state`, a PKCE verifier, and a five-minute expiry. AES-256-GCM provides both confidentiality and tamper detection. The callback compares state, uses the verifier to exchange the code, and clears the attempt cookie. A separate `app_session` cookie holds the mapped application identity and a one-hour expiry. Both cookies are `HttpOnly` and `SameSite=Lax`; they are `Secure` in production. The dashboard validates the app session on the server. Logging out clears it.
 
-## Why this design
+## Architecture choices from the authentication guide
 
-This PoC isolates the trust boundaries while keeping the exercise runnable without Redis, PostgreSQL, or ThaiD credentials. A protected short-lived cookie lets the app correlate a login attempt across the redirect without a server-side login-attempt store. A separate app session means business requests use the application's identity and authorization model rather than presenting the provider response on every request. The tradeoff is that stateless cookies are harder to revoke immediately or consume exactly once.
+The supplied authentication guide's ThaiD sections (25 and 27) describe several ways to keep OAuth login state and application sessions. They share the same trust boundary: the frontend starts login and follows redirects; the backend creates and validates state, exchanges the provider response, maps the external identity, and creates an application login; the identity provider authenticates the person. Provider endpoints, scopes, claims, and client authentication must come from the actual ThaiD integration contract.
 
-| Approach                    | Where login state and session live                                                | Useful when                                                            | Main tradeoff                                     |
-| --------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------- |
-| Encrypted cookie (this PoC) | Browser carries protected state and app session                                   | Small demos or systems that accept short expiry and limited revocation | Replay and immediate revocation need extra design |
-| Redis-backed                | Server stores short-lived login attempts and sessions; browser carries opaque IDs | Many app instances, high request volume, or immediate revocation       | Extra service to operate                          |
-| PostgreSQL-backed           | Server stores login attempts and sessions; browser carries opaque IDs             | A database already exists and simpler operations matter                | Database read/write on the auth path              |
-| Hybrid                      | Protected login-state cookie, server-side app session                             | Avoid login-attempt storage but retain revocable sessions              | Two lifecycle models to maintain                  |
+### 1. Where to keep the temporary login attempt
 
-A signed cookie alone protects integrity but does not hide the PKCE verifier; authenticated encryption does both. Regardless of storage, `state` correlates the callback to the initiating browser, PKCE binds the authorization code to the verifier, and the backend must validate the provider's identity result. These mechanisms solve different problems.
+The app must remember the random `state`, PKCE verifier, expiry, and possibly a safe return path while the browser visits the provider. The callback must validate that state before using the authorization code.
+
+| Option                         | How it works                                                                                              | Strength                                      | Cost or limitation                                                                                                           |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Redis                          | Store an attempt keyed by a state hash with a short TTL; the callback atomically consumes it              | One-time use and sharing across app instances | Requires Redis operations and availability                                                                                   |
+| PostgreSQL                     | Store an attempt row with state hash, protected verifier, expiry, and `used_at`; mark it used at callback | Durable and works with an existing database   | Adds reads/writes and cleanup policy                                                                                         |
+| Protected cookie (chosen here) | Encrypt and authenticate state, verifier, and expiry in a short-lived browser cookie                      | No login-attempt store; simple to run         | Cannot reliably enforce one-time use across parallel requests without shared state; requires careful key and cookie handling |
+
+The PoC uses AES-256-GCM because the verifier should be hidden as well as protected from modification. A signature alone proves integrity but leaves cookie contents readable. The cookie is `HttpOnly` and `SameSite=Lax`, has a five-minute maximum age, and becomes `Secure` over production HTTPS. The browser returns it to the callback; the server decrypts it, checks expiry and state, uses the verifier, then clears it. A shared store is the better choice when exact single-use consumption or operational control is required.
+
+### 2. Where to keep the application session
+
+After a provider identity is validated, the app maps that provider subject to its own user. The provider credential is not the app's permission model. Future business requests should use an application session and enforce current roles, permissions, and tenant boundaries on the server.
+
+| Option                                           | Browser carries                   | Server does on each request              | Best fit and tradeoff                                                                                |
+| ------------------------------------------------ | --------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Redis session                                    | Opaque random session ID          | Look up session and current user         | Fast shared lookup and immediate revocation, with another service to operate                         |
+| PostgreSQL session                               | Opaque random session ID          | Look up non-expired, non-revoked session | Straightforward when PostgreSQL is already present, at database-request cost                         |
+| Stateless encrypted/signed session (chosen here) | Protected app identity and expiry | Verify cryptography and expiry           | No central lookup, but copied cookies remain usable until expiry and embedded roles can become stale |
+
+The PoC's `app_session` is an encrypted, authenticated one-hour cookie. Logout removes it from this browser; it does **not** invalidate a copy already stolen. A production system needing immediate logout, cross-device revocation, or fresh permissions should use server-side sessions or add a revocation/version check. A hybrid is also possible: keep the short-lived login attempt in an encrypted cookie, then issue a Redis or PostgreSQL-backed app session.
+
+### 3. Refresh and authorization are separate decisions
+
+This demo has no refresh token. When the hour-long app session expires, the user starts login again. For a longer-lived experience, the guide presents a frontend-triggered refresh call that sends an `HttpOnly` cookie, and a backend-for-frontend design where the server owns the refresh credential. JavaScript-readable refresh tokens increase exposure to injected scripts. A client should retry an expired request at most once after a `401`; a `403` means the known user lacks permission and should not trigger refresh.
+
+After login, RBAC can grant broad permissions through roles; ABAC can restrict actions by resource ownership, tenant, store, region, status, or other context. For example, a store manager's role may permit `order.update_status`, while a resource check must still confirm the order belongs to an assigned store. The backend must enforce both checks near the protected operation. Long-lived embedded role claims become stale when privileges change, which favors short lifetimes or a current server-side lookup. Sensitive changes should be audited.
+
+### Why the cookie approach is chosen for this PoC
+
+For **this teaching repository**, the goal is to expose state, PKCE, the callback, and the app-session boundary with as little infrastructure as possible. A protected login-state cookie and a protected app-session cookie make every step runnable in the web app alone. This is the simplest way to study the mechanics, **not a universal best production architecture**. The choice changes when requirements change:
+
+- Need one-time login attempts, immediate revocation, or several app instances: use Redis-backed state and/or sessions.
+- Already rely on PostgreSQL and prefer fewer services: store attempts and sessions there.
+- Need no attempt store but revocable sessions: use the hybrid cookie-attempt plus server-session design.
+- Need provider/API access after login: define a backend-owned token/refresh lifecycle rather than putting high-value provider tokens in browser JavaScript.
+
+Whatever is chosen, `state` binds the callback to the initiating login, PKCE binds code exchange to the verifier, provider validation establishes external identity, and application authorization decides what that identity may do. Each step solves a different problem.
 
 ## Run the demo
 

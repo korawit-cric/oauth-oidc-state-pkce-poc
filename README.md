@@ -4,7 +4,7 @@ A [knowledge-sharing repository](https://github.com/korawit-cric/oauth-oidc-stat
 
 ## What this PoC teaches
 
-Authentication with an external provider and authorization inside an application are different responsibilities. The provider establishes an identity; the application validates that result, maps it to an application user, creates a session, and checks access to its own resources. The browser never decides that a callback proves identity on its own.
+The external provider returns a login result. The backend validates it, maps the identity, and creates its own encrypted cookie session. The browser follows redirects and sends cookies, but never decides whether a callback proves identity. This PoC stops at checking that the session exists and has not expired; it does not implement role or attribute permissions.
 
 The flow has two separate credentials: a **temporary login-attempt cookie** used only during the provider redirect, and an **application session cookie** used after login.
 
@@ -65,7 +65,7 @@ The PoC uses AES-256-GCM because the verifier should be hidden as well as protec
 
 ### 2. Where to keep the application session
 
-After a provider identity is validated, the app maps that provider subject to its own user. The provider credential is not the app's permission model. Future business requests should use an application session and enforce current roles, permissions, and tenant boundaries on the server.
+After a provider identity is validated, the backend maps its subject to an application user and creates a separate session. Future requests use that session, not the provider's authorization code or identity response. Here the protected dashboard only checks the session's authenticity and expiry.
 
 ```mermaid
 flowchart LR
@@ -75,39 +75,23 @@ flowchart LR
     C -->|Revocable| E[Opaque ID plus Redis or PostgreSQL]
     D --> F[Next request: verify cookie and expiry]
     E --> G[Next request: look up active session]
-    F --> H[Check app permissions and resource scope]
+    F --> H[Show protected dashboard]
     G --> H
-    H --> I[Allow or deny protected action]
 ```
 
-**Remember:** logging in proves who the user is; the permission and resource checks decide what that user can do.
+**Remember:** this PoC demonstrates login and a protected page, not a complete authorization policy.
 
-| Option                                           | Browser carries                   | Server does on each request              | Best fit and tradeoff                                                                                |
-| ------------------------------------------------ | --------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Redis session                                    | Opaque random session ID          | Look up session and current user         | Fast shared lookup and immediate revocation, with another service to operate                         |
-| PostgreSQL session                               | Opaque random session ID          | Look up non-expired, non-revoked session | Straightforward when PostgreSQL is already present, at database-request cost                         |
-| Stateless encrypted/signed session (chosen here) | Protected app identity and expiry | Verify cryptography and expiry           | No central lookup, but copied cookies remain usable until expiry and embedded roles can become stale |
+| Option                                           | Browser carries                   | Server does on each request              | Best fit and tradeoff                                                        |
+| ------------------------------------------------ | --------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------- |
+| Redis session                                    | Opaque random session ID          | Look up session and current user         | Fast shared lookup and immediate revocation, with another service to operate |
+| PostgreSQL session                               | Opaque random session ID          | Look up non-expired, non-revoked session | Straightforward when PostgreSQL is already present, at database-request cost |
+| Stateless encrypted/signed session (chosen here) | Protected app identity and expiry | Verify cryptography and expiry           | No central lookup, but copied cookies remain usable until expiry             |
 
-The PoC's `app_session` is an encrypted, authenticated one-hour cookie. Logout removes it from this browser; it does **not** invalidate a copy already stolen. A production system needing immediate logout, cross-device revocation, or fresh permissions should use server-side sessions or add a revocation/version check. A hybrid is also possible: keep the short-lived login attempt in an encrypted cookie, then issue a Redis or PostgreSQL-backed app session.
+The PoC's `app_session` is an encrypted, authenticated one-hour cookie. Logout removes it from this browser; it does **not** invalidate a copy already stolen. A production system needing immediate logout or cross-device revocation should use server-side sessions or add a revocation check. A hybrid is also possible: keep the short-lived login attempt in an encrypted cookie, then issue a Redis or PostgreSQL-backed app session.
 
-### 3. Refresh and authorization are separate decisions
+### What this demo leaves out
 
-This demo has no refresh token. When the hour-long app session expires, the user starts login again. For a longer-lived experience, the guide presents a frontend-triggered refresh call that sends an `HttpOnly` cookie, and a backend-for-frontend design where the server owns the refresh credential. JavaScript-readable refresh tokens increase exposure to injected scripts. A client should retry an expired request at most once after a `401`; a `403` means the known user lacks permission and should not trigger refresh.
-
-For a protected action, the checks are sequential: identify the user, check the broad permission, then check the specific resource and context.
-
-```mermaid
-flowchart LR
-    A[Request] --> B{Valid app session?}
-    B -->|No| C[401: log in again]
-    B -->|Yes| D{RBAC permission?}
-    D -->|No| E[403: access denied]
-    D -->|Yes| F{ABAC: correct tenant, owner, state?}
-    F -->|No| E
-    F -->|Yes| G[Perform action and audit]
-```
-
-The authorization diagram is a **production design target**, not behavior implemented by this demo dashboard. After login, RBAC can grant broad permissions through roles; ABAC can restrict actions by resource ownership, tenant, store, region, status, or other context. For example, a store manager's role may permit `order.update_status`, while a resource check must still confirm the order belongs to an assigned store. The backend must enforce both checks near the protected operation. Long-lived embedded role claims become stale when privileges change, which favors short lifetimes or a current server-side lookup. Sensitive changes should be audited.
+There is no refresh token or refresh endpoint. When the one-hour app cookie expires, login starts again. The dashboard does not enforce RBAC, ABAC, tenant rules, or business permissions; those belong to a separate authorization layer if a real application needs them.
 
 ### Why the cookie approach is chosen for this PoC
 
@@ -146,4 +130,4 @@ Keep the secret out of Git. If you use the root `npm run dev` command, place the
 
 The mock provider returns a simplified identity response. A real ThaiD adapter needs the registered endpoints, exact redirect URI, required client authentication, and validation of the actual OIDC identity result, including signature, issuer, audience, expiry, nonce where applicable, and claim mapping. Do not treat a callback query parameter or an unverified decoded token as identity.
 
-The current mock code is not one-time. The app session is stateless, so clearing one browser's cookie does not revoke a copied cookie. The PoC also does not implement durable user mapping, RBAC/ABAC, tenant checks, audit logs, rate limits, or a production CSRF strategy for state-changing actions. Those are application responsibilities to add before real use; roles and permissions must be enforced server-side against current data.
+The current mock code is not one-time. The app session is stateless, so clearing one browser's cookie does not revoke a copied cookie. The PoC also does not implement durable user mapping, RBAC/ABAC, tenant checks, audit logs, rate limits, refresh, or a production CSRF strategy for state-changing actions. Add those separately if a real application requires them.

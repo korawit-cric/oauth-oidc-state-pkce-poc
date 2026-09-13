@@ -24,9 +24,6 @@ export default async function Dashboard() {
           <strong>Application user:</strong> {session.sub}
         </p>
         <p>
-          <strong>Application role:</strong> {session.role}
-        </p>
-        <p>
           <strong>Session expires:</strong>{' '}
           {new Date(session.expiresAt).toLocaleString()}
         </p>

@@ -6,7 +6,6 @@ export type LoginAttempt = {
 export type Session = {
   sub: string;
   name: string;
-  role: 'viewer';
   expiresAt: number;
 };
 export type MockCode = {

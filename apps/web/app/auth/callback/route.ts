@@ -47,7 +47,6 @@ export async function GET(request: NextRequest) {
   const session: Session = {
     sub: identity.subject,
     name: identity.name,
-    role: 'viewer',
     expiresAt: Date.now() + 60 * 60_000,
   };
   const response = NextResponse.redirect(new URL('/dashboard', request.url));

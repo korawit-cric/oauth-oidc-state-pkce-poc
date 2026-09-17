@@ -17,6 +17,7 @@ The external provider proves identity only during login. After the backend valid
 External identity                    Application identity
 -----------------                    --------------------
 provider subject: mock-thaid-123  -> PostgreSQL AppUser row
+                                  -> PostgreSQL AuthSession row
                                   -> encrypted app_session cookie
                                   -> protected application page
 ```
@@ -25,12 +26,12 @@ The browser never decides that login succeeded. It only follows redirects and ca
 
 ## 2. Responsibilities
 
-| Component         | Responsibility                                                                                                                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Next.js frontend  | Starts login through the API, renders login errors, forwards the incoming cookie to the API during protected server rendering, and displays the session result.            |
-| NestJS API        | Generates and validates OAuth state and PKCE, owns the callback and token exchange, encrypts/decrypts cookies, persists the mapped user, validates sessions, and logs out. |
-| Mock provider     | Validates the demo authorization request, returns a short-lived authorization code, and exchanges it for a fixed demo identity.                                            |
-| Prisma/PostgreSQL | Stores the durable `AppUser` record keyed by the provider's unique subject. It does not store the temporary login attempt or app session in this PoC.                      |
+| Component         | Responsibility                                                                                                                                                                                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Next.js frontend  | Starts login through the API, renders login errors, forwards the incoming cookie to the API during protected server rendering, and displays the session result.                                                                                     |
+| NestJS API        | Generates and validates OAuth state and PKCE, owns the callback and token exchange, encrypts/decrypts cookies, persists the mapped user and each session, validates sessions against PostgreSQL, and supports current-session or all-device logout. |
+| Mock provider     | Validates the demo authorization request, returns a short-lived authorization code, and exchanges it for a fixed demo identity.                                                                                                                     |
+| Prisma/PostgreSQL | Stores the durable `AppUser` and revocable `AuthSession` rows. The temporary OAuth login attempt remains in an encrypted cookie.                                                                                                                    |
 
 ## 3. Complete authentication flow
 
@@ -48,12 +49,15 @@ Browser                    NestJS API                   Mock provider           
   |                            | POST code + verifier -------->|                         |
   |                            |<-- external identity ---------|                         |
   |                            | upsert AppUser --------------------------------------->|
-  |                            |<------------------------------------------ mapped user |
+  |                            | create AuthSession ----------------------------------->|
+  |                            |<------------------------------ user + active session |
   |<-- app_session cookie -----| clear oauth_attempt          |                         |
   |<-- redirect /dashboard ----|                              |                         |
   | GET /dashboard            |                              |                         |
   |---------------- Next.js forwards cookie ----------------->|                         |
-  |                            | decrypt + validate session   |                         |
+  |                            | decrypt cookie + hash token |                         |
+  |                            | find active AuthSession ----------------------------->|
+  |                            |<-------------------------------------- session + user |
   |<-- protected page ---------|                              |                         |
 ```
 
@@ -130,34 +134,47 @@ Returning users resolve to the same application user. A changed display name is 
 
 ### Step 5: Create the app session
 
-After the user is mapped, NestJS creates a separate one-hour session payload:
+After the user is mapped, NestJS generates a new random session token. PostgreSQL stores only its SHA-256 hash in an `AuthSession` row:
+
+```text
+AuthSession
+  id          internal session ID
+  tokenHash   SHA-256 hash of the random browser token (unique)
+  userId      owning AppUser
+  expiresAt   one hour after login
+  revokedAt   null while active; timestamp after logout
+  createdAt
+```
+
+The raw random token is never stored in PostgreSQL. The encrypted browser cookie contains only the raw token and matching expiry:
 
 ```json
 {
-  "userId": 1,
-  "externalSubject": "mock-thaid-123",
-  "displayName": "Demo ThaiD User",
+  "token": "random session token",
   "expiresAt": 1234567890
 }
 ```
 
-The API clears `oauth_attempt`, sets the encrypted `app_session` cookie, and redirects to the Next.js `/dashboard` page.
+The API clears `oauth_attempt`, sets `app_session`, and redirects to the Next.js `/dashboard` page. Every login creates a distinct `AuthSession`, so one user can have several independently revocable device or browser sessions.
 
 ### Step 6: Validate protected requests
 
-The dashboard is server-rendered by Next.js. Next.js forwards the browser's cookies to `GET /auth/session` on the NestJS API. NestJS decrypts `app_session`, checks its expiry, and returns the session data. If validation fails, the API returns `401` and Next.js redirects to the home page.
+The dashboard is server-rendered by Next.js. Next.js forwards the browser's cookies to `GET /auth/session` on the NestJS API. NestJS decrypts `app_session`, checks the cookie expiry, hashes the raw token, and loads the matching `AuthSession` and `AppUser` from PostgreSQL. The session is accepted only when the row exists, has not expired, and has `revokedAt = null`. If validation fails, the API returns `401` and Next.js redirects to the home page.
 
 The frontend does not decrypt the cookie and browser JavaScript cannot read it because it is `HttpOnly`.
 
 ### Step 7: Logout
 
-The dashboard submits `POST /auth/logout` directly to NestJS. The API expires `app_session` and redirects to the frontend with HTTP `303`.
+The dashboard offers two server-owned actions:
 
-This removes the cookie from that browser. Because this PoC uses a stateless app session, a copied cookie remains valid until its one-hour expiry.
+- `POST /auth/logout` hashes the current cookie token, sets `revokedAt` on that one `AuthSession`, clears the cookie, and redirects with HTTP `303`.
+- `POST /auth/logout-all` resolves the current user and sets `revokedAt` on every active `AuthSession` belonging to that user. This invalidates sessions from all browsers and devices immediately on their next request.
+
+Clearing the browser cookie is only client cleanup. PostgreSQL revocation is the authoritative logout operation, so a copied cookie is rejected after its row is revoked.
 
 ## 4. Cookie protection
 
-Both cookies use AES-256-GCM authenticated encryption. Each cookie contains:
+The temporary login cookie and the database-backed session cookie use AES-256-GCM authenticated encryption. Each cookie contains:
 
 ```text
 base64url(initialization-vector).base64url(ciphertext).base64url(authentication-tag)
@@ -190,21 +207,22 @@ Cookie attributes:
 | `POST /mock-provider/token`    | NestJS mock provider | Validate code + PKCE verifier and return the demo identity.                        |
 | `GET /auth/callback`           | NestJS               | Validate the attempt, exchange the code, upsert the user, and issue `app_session`. |
 | `GET /auth/session`            | NestJS               | Decrypt and validate `app_session`; return `401` when invalid.                     |
-| `POST /auth/logout`            | NestJS               | Expire `app_session` and redirect to the frontend.                                 |
+| `POST /auth/logout`            | NestJS               | Revoke the current `AuthSession`, clear the cookie, and redirect.                  |
+| `POST /auth/logout-all`        | NestJS               | Revoke every active session for the current user and clear the cookie.             |
 | `GET /dashboard`               | Next.js              | Forward cookies to the API and render the protected page after validation.         |
 
 ## 6. Why encrypted cookies are used
 
-This PoC deliberately avoids Redis and avoids storing login attempts or sessions in PostgreSQL. That keeps the learning flow small while still using PostgreSQL for durable application-user mapping.
+This PoC keeps the temporary OAuth attempt in an encrypted cookie, avoiding Redis or a login-attempt table. Application sessions are PostgreSQL-backed so logout, including logout from all devices, takes effect immediately.
 
 Alternative designs:
 
-| State to store | Redis                                                  | PostgreSQL                                    | Encrypted cookie used here                                                             |
-| -------------- | ------------------------------------------------------ | --------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Login attempt  | Shared TTL entry that can be atomically consumed once. | Attempt row with expiry and `usedAt`.         | No backend lookup, but reliable one-time consumption requires additional shared state. |
-| App session    | Opaque ID with fast lookup and immediate revocation.   | Opaque ID with durable lookup and revocation. | No lookup, but a copied cookie works until expiry.                                     |
+| State to store | Redis                                                  | PostgreSQL                                                       | Encrypted cookie used here                                                             |
+| -------------- | ------------------------------------------------------ | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Login attempt  | Shared TTL entry that can be atomically consumed once. | Attempt row with expiry and `usedAt`.                            | No backend lookup, but reliable one-time consumption requires additional shared state. |
+| App session    | Opaque ID with fast lookup and immediate revocation.   | Hashed token with durable lookup and revocation **(used here)**. | Fully stateless data avoids lookup but cannot be immediately revoked.                  |
 
-Use Redis or PostgreSQL-backed sessions when immediate revocation, cross-device logout, one-time attempt consumption, or current server-side user data on every request matters. A useful hybrid is an encrypted login-attempt cookie followed by a revocable server-side app session.
+This implementation is the hybrid approach: encrypted cookie state for the short OAuth round trip, followed by a PostgreSQL-backed app session. Redis remains an alternative for high-volume session lookup. A database lookup on every protected request is the deliberate cost of authoritative revocation.
 
 ## 7. Run locally
 
@@ -265,7 +283,7 @@ For the current cross-port localhost setup, both apps use the same `localhost` h
 - `apps/api/src/auth/auth.service.ts`: state/PKCE flow, mock-code checks, Prisma mapping, and session creation.
 - `apps/api/src/auth/auth.crypto.ts`: AES-GCM sealing/opening, random secrets, PKCE challenge, and timing-safe comparison.
 - `apps/api/src/auth/auth.types.ts`: login-attempt, mock-code, and app-session payloads.
-- `packages/prisma/prisma/schema.prisma`: durable `AppUser` model.
+- `packages/prisma/prisma/schema.prisma`: durable `AppUser` and revocable `AuthSession` models.
 - `apps/web/app/(home)/page.tsx`: login entry point and error display.
 - `apps/web/app/dashboard/page.tsx`: server-side session check and protected result.
 
@@ -275,10 +293,9 @@ This repository demonstrates authentication mechanics, not a complete production
 
 - real ThaiD endpoints or real user authentication;
 - one-time consumption of the mock authorization code;
-- immediate revocation of a copied stateless session;
 - refresh tokens or silent renewal;
 - RBAC, ABAC, tenant authorization, or business permissions;
 - production-grade CSRF handling for general state-changing routes;
-- rate limiting, audit events, device sessions, or encryption-key rotation.
+- rate limiting, audit events, device metadata/names, automatic expired-session cleanup, or encryption-key rotation.
 
 Add those according to the real application's threat model and operational requirements.

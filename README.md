@@ -13,18 +13,18 @@ There are two cookies with different jobs:
 
 ## 2. Who is responsible for what?
 
-| Part                  | Responsibility in this PoC                                                                           |
-| --------------------- | ---------------------------------------------------------------------------------------------------- |
-| Browser / frontend    | Start login, follow redirects, send cookies, display the result.                                     |
-| Next.js server routes | Generate and verify state/PKCE, exchange the code, map identity, issue and validate the app session. |
-| Local mock provider   | Return an authorization code and a fixed demo identity. It stands in for an external provider.       |
+| Part                | Responsibility in this PoC                                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Browser / frontend  | Start login, follow redirects, send cookies, display the result.                                                               |
+| NestJS API          | Generate and verify state/PKCE, exchange the code, persist the mapped user through Prisma, and issue/validate the app session. |
+| Local mock provider | Return an authorization code and a fixed demo identity. It stands in for an external provider.                                 |
 
 In a real ThaiD integration, ThaiD would authenticate the user. Its actual endpoints, scopes, claims, and client-authentication requirements must come from the integration contract.
 
 ## 3. Login flow, step by step
 
 ```text
-Browser                  App server                 Mock provider
+Browser                  NestJS API                 Mock provider
   | GET /auth/login          |                            |
   |------------------------->| create state + PKCE        |
   |<-- oauth_attempt cookie -| redirect with challenge   |
@@ -43,7 +43,7 @@ Browser                  App server                 Mock provider
 1. `GET /auth/login` generates a random `state` and PKCE verifier. The server encrypts them into the five-minute `oauth_attempt` cookie and redirects the browser with the derived S256 challenge.
 2. The mock provider returns an authorization `code` and the original `state` to `/auth/callback`.
 3. The callback decrypts the attempt cookie, checks its expiry, compares `state`, and exchanges the code using the saved verifier. A missing, expired, or mismatched attempt is rejected.
-4. The server maps the returned mock identity to an application identity, clears `oauth_attempt`, and sets a one-hour encrypted `app_session` cookie.
+4. The NestJS API maps the returned mock identity to an `AppUser` in PostgreSQL through Prisma, clears `oauth_attempt`, and sets a one-hour encrypted `app_session` cookie.
 5. On `/dashboard`, the server decrypts `app_session` and checks its expiry. Logout clears the cookie in this browser.
 
 `state` ties the callback to the login that started in this browser. PKCE ties the code exchange to the verifier created by our server. The application session is a new credential for our app; it is not the provider's code or token.
@@ -76,32 +76,30 @@ A hybrid can use the encrypted login-attempt cookie from section 4 and a revocab
 
 ## 6. Why this PoC chooses encrypted cookies
 
-The purpose is to make the OAuth redirect, `state`, PKCE, callback, and app-session boundary easy to see **without running Redis or PostgreSQL**. Two short-lived protected cookies keep the runnable example small. This is the best fit for the PoC's learning goal, not a claim that stateless cookies are best for every production application.
+The purpose is to make the OAuth redirect, `state`, PKCE, callback, and app-session boundary easy to see **without running Redis or storing login attempts/sessions in PostgreSQL**. Two short-lived protected cookies keep the runnable example small. This is the best fit for the PoC's learning goal, not a claim that stateless cookies are best for every production application.
 
 Choose a server-side store when you need one-time login-attempt consumption, immediate session revocation, cross-device logout, or current server-side user data on every request. Redis is useful when it is already operated or traffic is high; PostgreSQL is often simpler when it is already the application's database.
 
 ## 7. Run and inspect
 
-Requires Node.js 22.12 or newer and npm. Only `apps/web` is needed for this flow; the NestJS API and database directories are not used.
+Requires Node.js 22.12 or newer and npm. The full base structure is used: `apps/web` provides the UI, `apps/api` owns OAuth and cookies, and PostgreSQL/Prisma stores the mapped application user.
 
-1. Run `npm install`.
-2. Generate a secret: `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`.
-3. Put it in `apps/web/.env.local` as `AUTH_COOKIE_SECRET=<generated value>`.
-4. Run `npm run dev --workspace=web` and open <http://localhost:3000>.
+1. Run `npm install` and copy `.env.example` to `.env`.
+2. Generate a secret with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"` and set it as `AUTH_COOKIE_SECRET` in the root `.env`.
+3. Start PostgreSQL with `npm run db:start`, then run `npm run db:generate` and `npm run db:push`.
+4. Run `npm run dev` to start both Next.js and NestJS, then open <http://localhost:3000>.
 5. Click **Start mock ThaiD login**. In browser developer tools, inspect the redirects, the two cookies, `/dashboard`, and logout.
 
-Keep the secret out of Git. If using the root `npm run dev` command, put it in the root `.env` so the repository's environment-distribution script can share it with the app.
+Keep the root `.env` and its secret out of Git. The repository distributes that file to the apps when `npm run dev` starts.
 
 ## 8. Implementation map and limits
 
-- `apps/web/app/auth/login/route.ts`: start login and set the temporary cookie.
-- `apps/web/app/mock-provider/`: local authorization and token endpoints.
-- `apps/web/app/auth/callback/route.ts`: check state, exchange code, create the app session.
-- `apps/web/lib/auth/`: authenticated encryption and flow types.
-- `apps/web/app/dashboard/page.tsx`: validate the session server-side.
-- `apps/web/app/auth/logout/route.ts`: clear cookies.
+- `apps/api/src/auth/`: NestJS controllers and services for login, callback, mock provider, encryption, session validation, and logout.
+- `packages/prisma/prisma/schema.prisma`: durable `AppUser` mapping for the external subject.
+- `apps/web/app/(home)/page.tsx`: frontend entry point that starts login through the API.
+- `apps/web/app/dashboard/page.tsx`: asks the API to validate the cookie before rendering.
 - [`apps/web/AUTH_DEMO.md`](apps/web/AUTH_DEMO.md): further production considerations.
 
 The mock provider returns a simplified identity response. A real ThaiD adapter must use registered endpoints and redirect URI, required client authentication, and validation of the actual OIDC identity response (signature, issuer, audience, expiry, nonce where applicable, and claim mapping). Never treat callback query parameters or an unverified decoded token as identity.
 
-This PoC has no one-time mock-code consumption, immediate revocation of a copied cookie, durable user mapping, refresh, RBAC/ABAC, tenant checks, audit logs, rate limits, or production CSRF handling. Those are separate concerns to add if the real application requires them.
+This PoC has no one-time mock-code consumption, immediate revocation of a copied cookie, refresh, RBAC/ABAC, tenant checks, audit logs, rate limits, or production CSRF handling. Those are separate concerns to add if the real application requires them.

@@ -1,15 +1,16 @@
 # OAuth + encrypted-cookie demo
 
-This demo runs inside the existing Next.js app in the Turborepo. It follows the external identity and encrypted login-state cookie architecture described in the source authentication guide.
+This demo uses the Turborepo base structure: Next.js for the UI, NestJS for the backend-owned OAuth flow and cookies, and Prisma/PostgreSQL for application-user mapping. It follows the external identity and encrypted login-state cookie architecture described in the source authentication guide.
 
 ## Run
 
-1. Install workspace dependencies with `npm install`.
-2. Set `AUTH_COOKIE_SECRET` in `apps/web/.env.local` to at least 32 random bytes encoded as base64url. Generate one with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`.
-3. Run `npm run dev --workspace=web` and open http://localhost:3000.
-4. Click **Start mock ThaiD login**, then inspect the redirect, callback, cookies, and protected dashboard in browser developer tools.
+1. Install dependencies with `npm install` and copy `.env.example` to `.env`.
+2. Set `AUTH_COOKIE_SECRET` in the root `.env` to at least 32 random bytes encoded as base64url.
+3. Start PostgreSQL and apply the schema with `npm run db:start`, `npm run db:generate`, and `npm run db:push`.
+4. Run `npm run dev` and open http://localhost:3000.
+5. Click **Start mock ThaiD login**, then inspect the redirect, callback, cookies, and protected dashboard in browser developer tools.
 
-No database, NestJS API, Redis, or real ThaiD credentials are required for this isolated demonstration.
+Redis and real ThaiD credentials are not required. PostgreSQL and the NestJS API are required.
 
 ## Flow
 

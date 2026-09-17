@@ -6,13 +6,13 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 
-const base64url = (value: Buffer) => value.toString('base64url');
+const encode = (value: Buffer) => value.toString('base64url');
 
 function key(purpose: string): Buffer {
   const secret = process.env.AUTH_COOKIE_SECRET;
   if (!secret || Buffer.from(secret, 'base64url').length < 32) {
     throw new Error(
-      'Set AUTH_COOKIE_SECRET to at least 32 random bytes encoded as base64url.',
+      'AUTH_COOKIE_SECRET must contain at least 32 random base64url bytes.',
     );
   }
   return createHash('sha256').update(secret).update(purpose).digest();
@@ -25,9 +25,7 @@ export function seal(value: object, purpose: string): string {
     cipher.update(JSON.stringify(value)),
     cipher.final(),
   ]);
-  return [base64url(iv), base64url(data), base64url(cipher.getAuthTag())].join(
-    '.',
-  );
+  return [encode(iv), encode(data), encode(cipher.getAuthTag())].join('.');
 }
 
 export function open<T>(token: string | undefined, purpose: string): T | null {
@@ -49,23 +47,12 @@ export function open<T>(token: string | undefined, purpose: string): T | null {
   }
 }
 
-export function randomSecret(): string {
-  return randomBytes(32).toString('base64url');
-}
+export const randomSecret = () => randomBytes(32).toString('base64url');
+export const challenge = (verifier: string) =>
+  createHash('sha256').update(verifier).digest('base64url');
 
-export function challenge(verifier: string): string {
-  return createHash('sha256').update(verifier).digest('base64url');
-}
-
-export function equal(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
+export function equal(leftValue: string, rightValue: string): boolean {
+  const left = Buffer.from(leftValue);
+  const right = Buffer.from(rightValue);
   return left.length === right.length && timingSafeEqual(left, right);
 }
-
-export const cookieOptions = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'lax' as const,
-  path: '/',
-};

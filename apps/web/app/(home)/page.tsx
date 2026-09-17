@@ -1,5 +1,3 @@
-import Link from 'next/link';
-
 export default async function Home({
   searchParams,
 }: {
@@ -23,12 +21,12 @@ export default async function Home({
           Login failed: invalid, expired, or mismatched callback.
         </p>
       )}
-      <Link
-        href="/auth/login"
+      <a
+        href={`${process.env.API_PUBLIC_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/auth/login`}
         className="inline-block rounded-lg bg-blue-700 px-6 py-3 font-semibold text-white"
       >
         Start mock ThaiD login
-      </Link>
+      </a>
       <div className="mt-10 grid gap-4 sm:grid-cols-2">
         <section className="rounded-xl border p-5">
           <h2 className="mb-2 font-bold">External provider</h2>

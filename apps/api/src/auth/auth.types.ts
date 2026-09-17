@@ -3,14 +3,17 @@ export type LoginAttempt = {
   verifier: string;
   expiresAt: number;
 };
-export type Session = {
-  sub: string;
-  name: string;
+
+export type AppSession = {
+  userId: number;
+  externalSubject: string;
+  displayName: string;
   expiresAt: number;
 };
+
 export type MockCode = {
-  sub: string;
-  name: string;
+  subject: string;
+  displayName: string;
   codeChallenge: string;
   redirectUri: string;
   expiresAt: number;

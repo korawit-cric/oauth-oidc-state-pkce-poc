@@ -9,6 +9,34 @@ A knowledge-sharing PoC for a **backend-owned OAuth/OIDC-style login** built wit
 
 The mock provider is for learning only. It does not connect to ThaiD or authenticate a real person.
 
+## Current implementation: revocable PostgreSQL sessions
+
+The application session is now **database-backed**. The encrypted browser cookie contains a random session token, while PostgreSQL stores only its SHA-256 hash in `auth_sessions`.
+
+```text
+Login
+  -> generate random session token
+  -> store SHA-256(token) in PostgreSQL AuthSession
+  -> encrypt raw token into HttpOnly app_session cookie
+
+Protected request
+  -> decrypt app_session cookie
+  -> hash token
+  -> find matching AuthSession
+  -> allow only when revokedAt is null and expiresAt is in the future
+
+Log out this session
+  -> revoke the matching AuthSession row
+  -> clear this browser's cookie
+
+Log out all devices
+  -> resolve the current AppUser
+  -> revoke every active AuthSession for that user
+  -> all browsers and devices receive 401 on their next protected request
+```
+
+This gives PostgreSQL final authority over whether a session is active. Deleting a cookie alone is no longer considered logout; the corresponding database row is revoked first.
+
 ## 1. Core design
 
 The external provider proves identity only during login. After the backend validates that result, it creates its own application user and session.
@@ -280,9 +308,9 @@ For the current cross-port localhost setup, both apps use the same `localhost` h
 ## 9. Code map
 
 - `apps/api/src/auth/auth.controller.ts`: HTTP routes, redirects, cookies, and mock-provider endpoints.
-- `apps/api/src/auth/auth.service.ts`: state/PKCE flow, mock-code checks, Prisma mapping, and session creation.
+- `apps/api/src/auth/auth.service.ts`: state/PKCE flow, mock-code checks, Prisma mapping, session creation, validation, and revocation.
 - `apps/api/src/auth/auth.crypto.ts`: AES-GCM sealing/opening, random secrets, PKCE challenge, and timing-safe comparison.
-- `apps/api/src/auth/auth.types.ts`: login-attempt, mock-code, and app-session payloads.
+- `apps/api/src/auth/auth.types.ts`: login-attempt, mock-code, session-cookie, and validated-session payloads.
 - `packages/prisma/prisma/schema.prisma`: durable `AppUser` and revocable `AuthSession` models.
 - `apps/web/app/(home)/page.tsx`: login entry point and error display.
 - `apps/web/app/dashboard/page.tsx`: server-side session check and protected result.

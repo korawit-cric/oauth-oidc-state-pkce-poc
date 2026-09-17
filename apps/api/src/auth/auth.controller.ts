@@ -114,15 +114,31 @@ export class AuthController {
   }
 
   @Get('auth/session')
-  session(@Req() request: Request, @Res() response: Response) {
-    const session = this.auth.readSession(readCookie(request, 'app_session'));
+  async session(@Req() request: Request, @Res() response: Response) {
+    const session = await this.auth.readSession(
+      readCookie(request, 'app_session'),
+    );
     return session
       ? response.json(session)
       : response.status(401).json({ error: 'unauthenticated' });
   }
 
   @Post('auth/logout')
-  logout(@Res() response: Response) {
+  async logout(@Req() request: Request, @Res() response: Response) {
+    await this.auth.revokeCurrentSession(readCookie(request, 'app_session'));
+    response.setHeader(
+      'Set-Cookie',
+      `app_session=; Max-Age=0; ${cookieOptions}${secure()}`,
+    );
+    return response.redirect(
+      303,
+      process.env.WEB_URL || 'http://localhost:3000',
+    );
+  }
+
+  @Post('auth/logout-all')
+  async logoutAll(@Req() request: Request, @Res() response: Response) {
+    await this.auth.revokeAllSessions(readCookie(request, 'app_session'));
     response.setHeader(
       'Set-Cookie',
       `app_session=; Max-Age=0; ${cookieOptions}${secure()}`,

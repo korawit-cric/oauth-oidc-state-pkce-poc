@@ -47,11 +47,18 @@ export default async function Dashboard() {
           {new Date(session.expiresAt).toLocaleString()}
         </p>
       </div>
-      <form action={`${apiUrl}/auth/logout`} method="post" className="mt-6">
-        <button className="rounded-lg bg-slate-900 px-5 py-3 text-white">
-          Log out
-        </button>
-      </form>
+      <div className="mt-6 flex flex-wrap gap-3">
+        <form action={`${apiUrl}/auth/logout`} method="post">
+          <button className="rounded-lg bg-slate-900 px-5 py-3 text-white">
+            Log out this session
+          </button>
+        </form>
+        <form action={`${apiUrl}/auth/logout-all`} method="post">
+          <button className="rounded-lg border border-red-600 px-5 py-3 text-red-700">
+            Log out all devices
+          </button>
+        </form>
+      </div>
     </main>
   );
 }

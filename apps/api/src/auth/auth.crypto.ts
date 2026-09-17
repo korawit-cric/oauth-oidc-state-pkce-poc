@@ -50,6 +50,8 @@ export function open<T>(token: string | undefined, purpose: string): T | null {
 export const randomSecret = () => randomBytes(32).toString('base64url');
 export const challenge = (verifier: string) =>
   createHash('sha256').update(verifier).digest('base64url');
+export const hashToken = (token: string) =>
+  createHash('sha256').update(token).digest('base64url');
 
 export function equal(leftValue: string, rightValue: string): boolean {
   const left = Buffer.from(leftValue);

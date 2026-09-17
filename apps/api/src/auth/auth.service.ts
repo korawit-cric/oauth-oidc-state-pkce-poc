@@ -1,8 +1,20 @@
 import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
-import { challenge, equal, open, randomSecret, seal } from './auth.crypto';
-import type { AppSession, LoginAttempt, MockCode } from './auth.types';
+import {
+  challenge,
+  equal,
+  hashToken,
+  open,
+  randomSecret,
+  seal,
+} from './auth.crypto';
+import type {
+  LoginAttempt,
+  MockCode,
+  SessionCookie,
+  SessionView,
+} from './auth.types';
 
 @Injectable()
 export class AuthService {
@@ -85,17 +97,82 @@ export class AuthService {
         displayName: identity.displayName,
       },
     });
-    const session: AppSession = {
-      userId: user.id,
-      externalSubject: user.externalSubject,
-      displayName: user.displayName,
-      expiresAt: Date.now() + 60 * 60_000,
+    const token = randomSecret();
+    const expiresAt = new Date(Date.now() + 60 * 60_000);
+    await this.prisma.client.authSession.create({
+      data: {
+        tokenHash: hashToken(token),
+        userId: user.id,
+        expiresAt,
+      },
+    });
+    const session: SessionCookie = {
+      token,
+      expiresAt: expiresAt.getTime(),
     };
     return seal(session, 'app-session');
   }
 
-  readSession(token: string | undefined): AppSession | null {
-    const session = open<AppSession>(token, 'app-session');
+  private readSessionCookie(cookie: string | undefined) {
+    const session = open<SessionCookie>(cookie, 'app-session');
     return session && session.expiresAt >= Date.now() ? session : null;
+  }
+
+  async readSession(cookie: string | undefined): Promise<SessionView | null> {
+    const protectedSession = this.readSessionCookie(cookie);
+    if (!protectedSession) return null;
+    const session = await this.prisma.client.authSession.findUnique({
+      where: { tokenHash: hashToken(protectedSession.token) },
+      include: { user: true },
+    });
+    if (
+      !session ||
+      session.revokedAt ||
+      session.expiresAt.getTime() < Date.now()
+    ) {
+      return null;
+    }
+    return {
+      userId: session.user.id,
+      externalSubject: session.user.externalSubject,
+      displayName: session.user.displayName,
+      expiresAt: session.expiresAt.getTime(),
+    };
+  }
+
+  async revokeCurrentSession(cookie: string | undefined) {
+    const session = this.readSessionCookie(cookie);
+    if (!session) return 0;
+    const result = await this.prisma.client.authSession.updateMany({
+      where: {
+        tokenHash: hashToken(session.token),
+        revokedAt: null,
+      },
+      data: { revokedAt: new Date() },
+    });
+    return result.count;
+  }
+
+  async revokeAllSessions(cookie: string | undefined) {
+    const protectedSession = this.readSessionCookie(cookie);
+    if (!protectedSession) return 0;
+    const current = await this.prisma.client.authSession.findUnique({
+      where: { tokenHash: hashToken(protectedSession.token) },
+    });
+    if (
+      !current ||
+      current.revokedAt ||
+      current.expiresAt.getTime() < Date.now()
+    ) {
+      return 0;
+    }
+    const result = await this.prisma.client.authSession.updateMany({
+      where: {
+        userId: current.userId,
+        revokedAt: null,
+      },
+      data: { revokedAt: new Date() },
+    });
+    return result.count;
   }
 }
